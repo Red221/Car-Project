@@ -1,0 +1,397 @@
+#!/usr/bin/env python
+#  v_01g  added keep intial bearing to MoveFwd
+#  v_01h  added speed contol to MoveFwd
+#  v_01i   added front left sensor and slow down if fl sensor sees wall
+#  v_01j   added front right sensor  added check dist every x odo readings (to let sensor settle?)
+#  v_01k  added bearing_input to MoveFwd & rotate inputs, slow rotate bearing change input and with dist while rotate
+#  v_01l   back to odo counter for rotation... bearing does not update fast enough. 
+#  v_01m added front center speed reduction dist, changed rotation to multiple stops and get readign,  added fl fr stop, added fl fr bad reading fix
+#  v_01n  changed rotation to multiple stops and get reading with input = degrees of turn
+# v_01o   redid the rotate section due to bug
+import RPi.GPIO as GPIO
+import time
+import smbus
+import math
+
+print 'Press Ctrl+C to end the program...'
+
+# ========================================================================
+#  COMPASS SENSOR CODE==================================================
+
+bus = smbus.SMBus(1)  # changed from 0 to 1 in ()
+address = 0x1e
+def read_byte(adr):
+	return bus.read_byte_data(address, adr)
+def read_word(adr):
+	high = bus.read_byte_data(address, adr)
+	low = bus.read_byte_data(address, adr+1)
+	val = (high << 8) + low
+	return val
+
+def read_word_2c(adr):
+	val = read_word(adr)
+	if (val >= 0x8000):
+		return -((65535 - val) + 1)
+	else:
+		return val
+
+def write_byte(adr, value):
+	bus.write_byte_data(address, adr, value)
+
+write_byte(0, 0b01110000) # Set to 8 samples @ 15Hz
+write_byte(1, 0b00100000) # 1.3 gain LSb / Gauss 1090 (default)
+write_byte(2, 0b00000000) # Continuous sampling
+
+scale = 0.92
+
+x_offset = 104
+y_offset = -262
+
+def get_bearing():
+	x_out = (read_word_2c(3) - x_offset) * scale
+	y_out = (read_word_2c(7) - y_offset) * scale
+	z_out = (read_word_2c(5)) * scale
+
+
+	bearing  = math.atan2(y_out, x_out)
+
+	if (bearing < 0):
+		bearing += 2 * math.pi
+	return round(math.degrees(bearing),2)
+# END COMPASS SENSOR CODE ==========================
+
+# Assign Ultra Sonic Pins
+TRIG_FC = 38  # Front Center Sensor
+ECHO_FC = 40
+TRIG_BC=35  # Back Center Sensor
+ECHO_BC =37
+TRIG_FL=31  # Front Left Sensor
+ECHO_FL=33
+TRIG_FR=32  # Front Right Sensor
+ECHO_FR=36
+
+# Assign motor 1 pins
+MotorPin1   = 11    # pin11
+MotorPin2   = 12    # pin12
+MotorEnable = 13    # pin13
+# Assign motor 2 pins
+Motor2Pin1   = 15    # pin15
+Motor2Pin2   = 16    # pin16
+Motor2Enable = 18    # pin18
+
+# Assign Odometer Sensors Pins
+odo_sensor_r = 22    # pin22 --- right odometer sensor
+odo_sensor_l = 29    # pin 29--  left odometer sensor
+
+GPIO.setmode(GPIO.BOARD) # Numbers GPIOs by physical location
+# setup ultra sonic sensor input/output
+GPIO.setup(TRIG_FC,GPIO.OUT)
+GPIO.setup(ECHO_FC,GPIO.IN)
+GPIO.setup(TRIG_BC,GPIO.OUT)
+GPIO.setup(ECHO_BC,GPIO.IN)
+GPIO.setup(TRIG_FL,GPIO.OUT)
+GPIO.setup(ECHO_FL,GPIO.IN)
+GPIO.setup(TRIG_FR,GPIO.OUT)
+GPIO.setup(ECHO_FR,GPIO.IN)
+# setup motor outputs
+GPIO.setup(MotorPin1, GPIO.OUT)   # mode --- output
+GPIO.setup(MotorPin2, GPIO.OUT)
+GPIO.setup(MotorEnable, GPIO.OUT)
+GPIO.output(MotorEnable, GPIO.LOW) # motor stop
+GPIO.setup(Motor2Pin1, GPIO.OUT)   # mode --- output
+GPIO.setup(Motor2Pin2, GPIO.OUT)
+GPIO.setup(Motor2Enable, GPIO.OUT)
+GPIO.output(Motor2Enable, GPIO.LOW) # motor stop
+# ODO odo sensors setups
+GPIO.setup(odo_sensor_r, GPIO.IN, pull_up_down=GPIO.PUD_UP)    # Set Sensor_Out's mode is input, and pull up to high level(3.3V)
+GPIO.setup(odo_sensor_l, GPIO.IN, pull_up_down=GPIO.PUD_UP)    # Set Sensor_Out's mode is input, and pull up to high level(3.3V)
+GPIO.add_event_detect(odo_sensor_r, GPIO.FALLING,bouncetime=20) # wait for falling
+GPIO.add_event_detect(odo_sensor_l, GPIO.FALLING,bouncetime=20) # wait for falling
+
+#================================================
+# define measure_distance functions
+
+def measure_distance_fc():
+	GPIO.output(TRIG_FC, False)
+	pulse_start=0  # initialize variables 
+	pulse_end=0
+
+	GPIO.output(TRIG_FC, True)
+	time.sleep(0.00001)
+	GPIO.output(TRIG_FC, False)
+
+	while GPIO.input(ECHO_FC)==0:
+		pulse_start = time.time()
+
+	while GPIO.input(ECHO_FC)==1:
+  		pulse_end = time.time()
+
+	pulse_duration = pulse_end - pulse_start
+
+	distance = pulse_duration * 17150
+	distance = round(distance, 2)
+	return distance
+	
+#---------------------------------------------------------------------------------------------------
+def measure_distance(TRIG,ECHO):
+	GPIO.output(TRIG, False)
+	pulse_start=0  # initialize variables 
+	pulse_end=0
+
+	GPIO.output(TRIG, True)
+	time.sleep(0.00001)
+	GPIO.output(TRIG, False)
+
+	while GPIO.input(ECHO)==0:
+		pulse_start = time.time()
+
+	while GPIO.input(ECHO)==1:
+  		pulse_end = time.time()
+
+	pulse_duration = pulse_end - pulse_start
+
+	distance = pulse_duration * 17150
+	distance = round(distance, 2)
+	return distance
+
+# =======================================================
+#  Car movement functions MoveFwd  MoveBck & Rotate
+# =======================================================
+def MoveFwd(m1speed,m2speed,maxdist,speed_input,bearing_input):  # moves car forward Motor 1 speed & Motor 2 speed
+	print "run forwards"
+	time.sleep(1)  # wait for distance sensor to settle
+	cum_counter_r=0 # initiate cummulative counter
+	cum_counter_l=0
+	bearing_adjust_factor=0.5  # this times bearing change = +- m1/2 speed adjustment 
+	speed_adjust_factor=0.1  # same as bearing_af but for speed control
+	min_PWM=15
+	front_c_speed_adj_dist=50   # front center distance for speed reduction
+	front_lr_speed_adj_dist=20   # front left or right distance for speed reduction
+	min_input_speed=30
+	new_time=0  # intialize new_time for speed calc
+	# ------- initialize bearing history
+	start_bearing=bearing_input
+	new_bearing=start_bearing
+	bearing_old_3=new_bearing
+	bearing_old_2=new_bearing
+	bearing_old_1=new_bearing
+	bearing_ave_old=new_bearing
+	bearing_ave_new=(new_bearing+bearing_old_1)/2
+	wall_distance_fc = measure_distance(TRIG_FC,ECHO_FC) # check front distance before start
+	wall_distance_fl1 = measure_distance(TRIG_FL,ECHO_FL)  # take 2 readings and ave
+	time.sleep(0.2)
+	wall_distance_fl2 = measure_distance(TRIG_FL,ECHO_FL)
+	wall_distance_fl=(wall_distance_fl1+wall_distance_fl2)/2
+	wall_distance_fr1 = measure_distance(TRIG_FR,ECHO_FR)  # take 2 readings and ave
+	time.sleep(0.2)
+	wall_distance_fr2 = measure_distance(TRIG_FR,ECHO_FR)
+	wall_distance_fr=(wall_distance_fr1+wall_distance_fr2)/2	
+		
+	print "d fl,fc,fr",wall_distance_fl,wall_distance_fc,wall_distance_fr
+	mp1 = GPIO.PWM(MotorEnable, 1000)     # set Frequece to 1KHz
+	mp2 = GPIO.PWM(Motor2Enable, 1000)    
+	mp1.start(m1speed)                     # Set initial duty cycle (motor speed)
+	mp2.start(m2speed)
+
+	while wall_distance_fc>30 and wall_distance_fr>15 and wall_distance_fl>15 and cum_counter_r<maxdist:	
+		# Run motor clockwise		
+		#GPIO.output(MotorEnable, GPIO.HIGH) # replaced with PWM
+		#GPIO.output(Motor2Enable, GPIO.HIGH) #replaced with PWM
+		GPIO.output(MotorPin1, GPIO.HIGH)  # clockwise
+		GPIO.output(MotorPin2, GPIO.LOW)
+		GPIO.output(Motor2Pin1, GPIO.HIGH)  # clockwise
+		GPIO.output(Motor2Pin2, GPIO.LOW)		
+		# look for sensor events and increment counter
+		if GPIO.event_detected(odo_sensor_r):
+			old_time=new_time
+			new_time=time.time()
+			delta_time=new_time-old_time
+			#print "nt ",new_time,"dt ",delta_time		
+			cum_counter_r=cum_counter_r+1
+			speed=round(1/delta_time,0)
+			#print "speed: ",speed
+
+			if abs(speed-speed_input)>2:
+				m1speed=m1speed-(speed-speed_input)*speed_adjust_factor
+				m2speed=m2speed-(speed-speed_input)*speed_adjust_factor
+				#------ fix m1/2speed if out of range
+				if m1speed >100:
+					m1speed=100
+				if m1speed<min_PWM:
+					m1speed=min_PWM
+				if m2speed >100:
+					m2speed=100
+				if m2speed<min_PWM:
+					m2speed=min_PWM		
+				mp1.ChangeDutyCycle(m1speed)                     # update motor speed
+				mp2.ChangeDutyCycle(m2speed)
+				# print "M1/2Speed ",m1speed," ",m2speed
+			
+			if cum_counter_r%4==0:		
+				new_bearing=  round(get_bearing(),0)
+				if abs(new_bearing-start_bearing)>2: # update m1/2 speed if bearing changes over x
+					m1speed=m1speed+(new_bearing-start_bearing)*bearing_adjust_factor
+					m2speed=m2speed-(new_bearing-start_bearing)*bearing_adjust_factor
+					#------ fix m1/2speed if out of range
+					if m1speed >100:
+						m1speed=100
+					if m1speed<min_PWM:
+						m1speed=min_PWM
+					if m2speed >100:
+						m2speed=100
+					if m2speed<min_PWM:
+						m2speed=min_PWM		
+					mp1.ChangeDutyCycle(m1speed)                     # update motor speed
+					mp2.ChangeDutyCycle(m2speed)
+					# print "M1/2Speed bearing ",m1speed," ",m2speed
+				wall_distance_fc = measure_distance(TRIG_FC,ECHO_FC) # update distances
+				wall_distance_fl1 = measure_distance(TRIG_FL,ECHO_FL)  # take 2 readings and ave
+				wall_distance_fr1 = measure_distance(TRIG_FR,ECHO_FR)
+				time.sleep(0.2)  # wait for settle before next reading
+				wall_distance_fl2 = round(measure_distance(TRIG_FL,ECHO_FL),0)
+				wall_distance_fr2 =round(measure_distance(TRIG_FR,ECHO_FR),0)
+				wall_distance_fl=round((wall_distance_fl1+wall_distance_fl2)/2,0)			
+				wall_distance_fr=round((wall_distance_fr1+wall_distance_fr2)/2,0)	
+				print "s,b,dist_fc,fl,fr",speed,new_bearing,wall_distance_fc ,wall_distance_fl,wall_distance_fr,"M1/2",m1speed,"/",m2speed
+				wall_dist_lr_min= min(wall_distance_fl,wall_distance_fr)
+				if wall_dist_lr_min < front_lr_speed_adj_dist:  # slow down if front l/r sensors see wall 
+					speed_input=speed_input*(wall_dist_lr_min /front_lr_speed_adj_dist)  # adjust speed using minimum wall dist
+					if speed_input< min_input_speed:  # dont decrease speed below min
+						speed_input=min_input_speed
+				if wall_distance_fc < front_c_speed_adj_dist:  # slow down if front center sensor sees wall 
+					speed_input=speed_input*(wall_distance_fc /front_c_speed_adj_dist)  # adjust speed using minimum wall dist
+					if speed_input< min_input_speed:  # dont decrease speed below min
+						speed_input=min_input_speed
+
+		if GPIO.event_detected(odo_sensor_l):  # increments odo_left cum counter 
+			cum_counter_l=cum_counter_l+1
+
+
+		
+	# stop
+	mp1.stop  # stops PWM
+	mp2.stop
+	GPIO.output(MotorEnable, GPIO.LOW) # motor stop
+	GPIO.output(Motor2Enable, GPIO.LOW) # added code motor2 stop	
+#----------------------------------------------------------------------------------------------------------------
+def MoveBck(m1speed,m2speed,maxdist):  # moves car forward Motor 1 speed & Motor 2 speed
+	print "run backwards"
+	time.sleep(1)  # wait for distance sensor to settle
+	cum_counter_r=0 # initiate cummulative counter
+	cum_counter_l=0 
+	# move back x number of sensor pulses	
+	time.sleep(1)  # wait for distance sensor to settle	
+	wall_distance_bc = measure_distance(TRIG_BC,ECHO_BC) # check distance before start
+	print "Distance : %.1f" % wall_distance_bc
+	mp1 = GPIO.PWM(MotorEnable, 1000)     # set Frequece to 1KHz
+	mp2 = GPIO.PWM(Motor2Enable, 1000)    
+	mp1.start(m1speed)                     # Set initial duty cycle (motor speed)
+	mp2.start(m2speed)
+
+	while wall_distance_bc>50 and cum_counter_r<maxdist:	
+		# Run motor clockwise		
+		#GPIO.output(MotorEnable, GPIO.HIGH) # replaced with PWM
+		#GPIO.output(Motor2Enable, GPIO.HIGH) #replaced with PWM
+		GPIO.output(MotorPin2, GPIO.HIGH)  # anti-clockwise
+		GPIO.output(MotorPin1, GPIO.LOW)
+		GPIO.output(Motor2Pin2, GPIO.HIGH)  # anti-clockwise
+		GPIO.output(Motor2Pin1, GPIO.LOW)		
+		# look for sensor events and increment counter
+		if GPIO.event_detected(odo_sensor_r):
+			cum_counter_r=cum_counter_r+1
+			wall_distance_bc = measure_distance(TRIG_BC,ECHO_BC)
+			current_bearing=get_bearing()  
+			# print "odo_r/l  c bearing ",cum_counter_r,"/",cum_counter_l," ",current_bearing
+			if cum_counter_r%5==0:
+				wall_distance_bc = measure_distance(TRIG_BC,ECHO_BC)
+				wall_distance_fc = measure_distance(TRIG_FC,ECHO_FC)
+				print "wall dist b/f",wall_distance_bc,wall_distance_fc
+		
+		if GPIO.event_detected(odo_sensor_l):
+			cum_counter_l=cum_counter_l+1
+	# stop
+	mp1.stop  # stops PWM
+	mp2.stop
+	GPIO.output(MotorEnable, GPIO.LOW) # motor stop
+	GPIO.output(Motor2Enable, GPIO.LOW) # added code motor2 stop	
+
+#----------------------------------------------------------------------------------------------------------------
+def Rotate(m1speed,m2speed,ODO_increment,rotate_degrees):  # car rotates ODO increment 
+	print "rotate",rotate_degrees,"using ODO_inc of ",ODO_increment
+	ODO_counter_r=0
+	cum_ODO_r=0
+	rotate_steps=1
+	past_360_flag=0  # initalize counter for rotations past the 0-360 angle	
+	mp1 = GPIO.PWM(MotorEnable, 1000)     # set Frequece to 1KHz
+	mp2 = GPIO.PWM(Motor2Enable, 1000)    
+	GPIO.output(MotorPin2, GPIO.HIGH)  # anti-clockwise
+	GPIO.output(MotorPin1, GPIO.LOW)
+	GPIO.output(Motor2Pin1, GPIO.HIGH)  # anti-clockwise
+	GPIO.output(Motor2Pin2, GPIO.LOW)
+	time.sleep(1)  # allow compass to settle
+	start_bearing=get_bearing()
+	current_bearing=start_bearing  # initalize current bearing  
+	delta_bearing=0  # initalize delta_rotate as 0
+	mp1.start(m1speed)                     # Set initial duty cycle (motor speed)
+	mp2.start(m2speed)
+	while cum_ODO_r <150 and delta_bearing<rotate_degrees:
+		ODO_counter_r=0  # resets ODO counter prior to next rotate increment
+		mp1.ChangeDutyCycle(m1speed)      # reset PWM to input speed
+		mp2.ChangeDutyCycle(m2speed)
+		while ODO_counter_r<ODO_increment:
+			if GPIO.event_detected(odo_sensor_r):
+				ODO_counter_r=ODO_counter_r+1
+				#print ODO_counter_r
+		cum_ODO_r=cum_ODO_r+ODO_counter_r
+		mp1.ChangeDutyCycle(0)      # set PWM to zero
+		mp2.ChangeDutyCycle(0)
+		time.sleep(1)  # allow compass to settle
+		last_bearing=current_bearing
+		current_bearing=get_bearing()
+		if (current_bearing- last_bearing) <-10:  # check for crossing 0/360 angle and increments past_360_flag
+			past_360_flag=past_360_flag+1
+		delta_bearing=current_bearing-start_bearing+360*past_360_flag
+		wall_distance_fc = measure_distance(TRIG_FC,ECHO_FC) # update distances
+		wall_distance_fr = measure_distance(TRIG_FR,ECHO_FR)
+		wall_distance_bc = measure_distance(TRIG_BC,ECHO_BC)
+		if wall_distance_fr<1:   # check for bad reading
+			wall_distance_fr=100
+		wall_distance_fl = measure_distance(TRIG_FL,ECHO_FL) 
+		if wall_distance_fl<1:   # check for bad reading
+			wall_distance_fl=100
+		#print "rstep/c_ODO",rotate_steps,"/",cum_ODO_r,"b- c/d",current_bearing,"/",delta_bearing,"d-- fl,fc,fr,bc",wall_distance_fl ,wall_distance_fc,wall_distance_fr,wall_distance_bc
+		print "rstep/c_ODO",rotate_steps,"/",cum_ODO_r,"b- c/d",current_bearing,"/",delta_bearing,"d-- fc,bc",wall_distance_fc,wall_distance_bc
+		rotate_steps=rotate_steps+1
+	# stop
+	mp1.stop  # stops PWM
+	mp2.stop
+	GPIO.output(MotorEnable, GPIO.LOW) # motor stop
+	GPIO.output(Motor2Enable, GPIO.LOW) # added code motor2 stop
+
+	
+#  End Car Movement Functions ====================================
+
+def destroy():
+	GPIO.output(MotorEnable, GPIO.LOW) # motor stop
+	GPIO.output(Motor2Enable, GPIO.LOW) # added code motor2 stop
+	GPIO.cleanup()                     # Release resource
+
+if __name__ == '__main__':     # Program start from here
+	print "start program"
+	try:	
+		trial =1 # initalize trial
+		while trial <= 2:	
+			time.sleep(1)  # wait for distance sensor to settle
+			start_bearing=get_bearing()
+			print "trial #:", trial,"Start bearing",start_bearing
+			MoveFwd(30,30,500,35,start_bearing)  # start PWM L /R, odo max, input speed,bearing
+			MoveBck(50,50,15)
+			Rotate(50,50,4,180)  # start PWM, ODO increment between readings, start bearing, turn degrees
+			trial = trial +1
+		
+		GPIO.cleanup()                     # Release resource
+	
+	except KeyboardInterrupt:  # When 'Ctrl+C' is pressed, the child program destroy() will be  executed.
+		destroy()
+
+
