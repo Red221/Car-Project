@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+# Car_v02a   Move along wall only to start.. revamp code without speed control
+# Car_v02b_fw   find wall direction only  revamped code using modules
+# Car_v02c   Add move and rotate modules
+# Car_v02d   Update module_Move_v01 from a to b  Updated again to v01c
+# Car_v02e   Updated movement logic
+# Car_v02f   added xy tracking
+
+import RPi.GPIO as GPIO
+import time
+import smbus
+import math
+
+print 'Press Ctrl+C to end the program...'
+
+#    import sensor & pin assignment modules  ========================================================================
+import module_compass_v1a
+get_bearing=module_compass_v1a.get_bearing
+import module_measure_distance_v1a   
+measure_distance=module_measure_distance_v1a.measure_distance
+from module_pin_motor_setup_v01a import *
+import module_trackxy_v01a 
+calc_delta_xy=module_trackxy_v01a.calc_delta_xy
+
+#=====================================================================================================
+#  import Movement functions
+#-------------------------------------------------------------------------------------------------------------------------
+import module_Rotate_v01a
+Rotate_xdegrees_byODO_FM=module_Rotate_v01a.Rotate_xdegrees_byODO_FM
+Rotate_xdegrees_var_ODO=module_Rotate_v01a.Rotate_xdegrees_var_ODO
+import module_Move_v01d
+MoveFwd=module_Move_v01d.MoveFwd
+MoveFwd_bi=module_Move_v01d.MoveFwd_bi
+MoveAlongWall=module_Move_v01d.MoveAlongWall
+MoveBck=module_Move_v01d.MoveBck
+MoveBck_Update_xy=module_Move_v01d.MoveBck_Update_xy
+
+# define variables
+wall_count=0	# used to track how many wall segment the car has moved along
+x=0    #  initialize x / y location
+y=0 
+#  End Car Movement Functions =======================================================================================
+def destroy():
+	GPIO.output(Motor1Enable, GPIO.LOW) # motor stop
+	GPIO.output(Motor2Enable, GPIO.LOW) # added code motor2 stop
+	GPIO.cleanup()                     # Release resource
+	print "end program"
+
+if __name__ == '__main__':     # Program start from here
+	print "start program"
+	try:	
+
+		#  Step 1  ----------------------------------------------------------------------------------------------------------------------------------------------
+		# move in a straight line along the start bearing to find a wall.   Assumes Initial starting point is away from walls
+		time.sleep(0.2)  # time for sensor to settle
+		current_bearing=get_bearing()
+		MoveFwd_bi(50,47,300,50,current_bearing,x,y)   # motor l dc , motor  r dc, max odo, bearing, start x ,y) 
+		from module_Move_v01d import MoveFwd_bi_end_x
+		from module_Move_v01d import MoveFwd_bi_end_y
+		print "end xy",MoveFwd_bi_end_x,MoveFwd_bi_end_y
+		x=MoveFwd_bi_end_x  # update x/y location
+		y=MoveFwd_bi_end_y
+		from module_Move_v01d import MoveFwd_bi_stop  
+		print MoveFwd_bi_stop
+		#  update bearing and move back slighly from wall----------
+		MoveBck_end_xy=MoveBck_Update_xy(10,x,y)
+		x=MoveBck_end_xy[0]
+		y=MoveBck_end_xy[1]
+		print "xy",x,y
+				
+		# Step 2------------------------------------------------------------------------------------------------------------------------------------------------
+		#  Based on stop sensor, orient car to move along wall.  Direction depends on which front sensor detected the wall and caused the car to stop
+		
+		#  determine which wall direction to follow based on stop sensor and turn car-------
+		if MoveFwd_bi_stop=="fc":
+			wall_side="left"
+		elif MoveFwd_bi_stop == "fl":
+			wall_side="left"
+		elif MoveFwd_bi_stop == "fr":
+			wall_side="right"
+		# Rotate the car in steps to find the wall direction (minimum wall distance = wall direction)
+		Rotate_xdegrees_var_ODO(75,75,-60)          # (m1speed,m2speed,ODO_increment,rotate_degrees)
+		Rotate_xdegrees_byODO_FM(50,50,3,160)                           # (m1speed,m2speed,ODO_increment,rotate_degrees)
+		time.sleep(0.2)  # time for sensor to settle
+		current_bearing=get_bearing()
+		from module_Rotate_v01a import min_wall_bearing,min_wall_dist_fc       # can only import variables from main???
+		if wall_side == "left":
+			start_bearing= module_Rotate_v01a.min_wall_bearing-90   #  next trial run along wall
+		else:
+			start_bearing= module_Rotate_v01a.min_wall_bearing+90   #  next trial run along wall		
+		if start_bearing<0:  # check negitive value and correct by adding 360  
+			start_bearing= start_bearing+360
+		delta_bearing=start_bearing-current_bearing
+		Rotate_xdegrees_var_ODO(70,70,delta_bearing) 
+
+		# Step 3 keep following the wall ==================================
+		while wall_count <10:
+			
+			MoveAlongWall(50,40,300,wall_side,35)                                  #(m1_dc_start,m2_dc_start,maxdist,wall_side,wall_standoff)	
+			from module_Move_v01c import MoveAlong_stop  
+			print MoveAlong_stop
+			time.sleep(0.2)  # time for sensor to settle
+			current_bearing=get_bearing()
+			print "current_bearing",current_bearing
+			# MoveAlong_stop ="no_sw"
+			if MoveAlong_stop == "no_sw":
+				if wall_side=="left":
+					turn_degrees=80
+				else: 
+					turn_degrees=-80
+				print turn_degrees
+				MoveFwd(40,35,2)
+				Rotate_xdegrees_var_ODO(70,70,turn_degrees)
+				time.sleep(2)
+				MoveFwd(40,35,10)
+			elif MoveAlong_stop=="fc":
+				MoveBck(40,40,10)   #  (m1speed,m2speed,maxdist)
+				if wall_side=="left":
+					turn_degrees=-90
+				else: 
+					turn_degrees=90
+				Rotate_xdegrees_var_ODO(70,70,turn_degrees)
+			elif MoveAlong_stop == "fl":
+				MoveBck(50,25,10)
+				Rotate_xdegrees_var_ODO(70,70,-30)
+			elif MoveAlong_stop == "fr":
+				MoveBck(25,50,10)
+				Rotate_xdegrees_var_ODO(70,70,30)
+				wall_side="right"			
+			else: 
+				wall_count=1000   # end movement
+		 #========================================
+						
+		GPIO.cleanup()                     # Release resource
+		
+	
+	except KeyboardInterrupt:  # When 'Ctrl+C' is pressed, the child program destroy() will be  executed.
+		destroy()
