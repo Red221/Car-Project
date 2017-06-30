@@ -1,0 +1,185 @@
+#!/usr/bin/env python
+# Car_MoveF_Simple_v01a
+
+
+
+import RPi.GPIO as GPIO
+import time
+import smbus
+import math
+
+print 'Press Ctrl+C to end the program...'
+# ========================================================================
+#  COMPASS SENSOR CODE==================================================
+
+bus = smbus.SMBus(1)  # changed from 0 to 1 in ()
+address = 0x1e
+def read_byte(adr):
+	return bus.read_byte_data(address, adr)
+def read_word(adr):
+	high = bus.read_byte_data(address, adr)
+	low = bus.read_byte_data(address, adr+1)
+	val = (high << 8) + low
+	return val
+
+def read_word_2c(adr):
+	val = read_word(adr)
+	if (val >= 0x8000):
+		return -((65535 - val) + 1)
+	else:
+		return val
+
+def write_byte(adr, value):
+	bus.write_byte_data(address, adr, value)
+
+write_byte(0, 0b01110000) # Set to 8 samples @ 15Hz
+write_byte(1, 0b00100000) # 1.3 gain LSb / Gauss 1090 (default)
+write_byte(2, 0b00000000) # Continuous sampling
+
+scale = 0.92
+
+x_offset = -20
+y_offset = -142
+
+def get_bearing():
+	x_out = (read_word_2c(3) - x_offset) * scale
+	y_out = (read_word_2c(7) - y_offset) * scale
+	z_out = (read_word_2c(5)) * scale
+
+
+	bearing  = math.atan2(y_out, x_out)
+
+	if (bearing < 0):
+		bearing += 2 * math.pi
+	return round(math.degrees(bearing),2)
+# END COMPASS SENSOR CODE ==========================
+
+# Assign Ultra Sonic Pins
+TRIG_FC = 31  # Front Center Sensor
+ECHO_FC = 33
+TRIG_BC=35  # Back Center Sensor
+ECHO_BC =37
+TRIG_FL=8  # Front Left Sensor
+ECHO_FL=10
+TRIG_FR=40  # Front Right Sensor
+ECHO_FR=38
+
+# Assign motor 1 pins
+MotorPin1   = 11    # pin11
+MotorPin2   = 12    # pin12
+MotorEnable = 13    # pin13
+# Assign motor 2 pins
+Motor2Pin1   = 15    # pin15
+Motor2Pin2   = 16    # pin16
+Motor2Enable = 18    # pin18
+
+# Assign Odometer Sensors Pins
+odo_sensor_r = 22    # pin22 --- right odometer sensor
+odo_sensor_l = 29    # pin 29--  left odometer sensor
+
+GPIO.setmode(GPIO.BOARD) # Numbers GPIOs by physical location
+# setup ultra sonic sensor input/output
+GPIO.setup(TRIG_FC,GPIO.OUT)
+GPIO.setup(ECHO_FC,GPIO.IN)
+GPIO.setup(TRIG_BC,GPIO.OUT)
+GPIO.setup(ECHO_BC,GPIO.IN)
+GPIO.setup(TRIG_FL,GPIO.OUT)
+GPIO.setup(ECHO_FL,GPIO.IN)
+GPIO.setup(TRIG_FR,GPIO.OUT)
+GPIO.setup(ECHO_FR,GPIO.IN)
+# setup motor outputs
+GPIO.setup(MotorPin1, GPIO.OUT)   # mode --- output
+GPIO.setup(MotorPin2, GPIO.OUT)
+GPIO.setup(MotorEnable, GPIO.OUT)
+GPIO.output(MotorEnable, GPIO.LOW) # motor stop
+GPIO.setup(Motor2Pin1, GPIO.OUT)   # mode --- output
+GPIO.setup(Motor2Pin2, GPIO.OUT)
+GPIO.setup(Motor2Enable, GPIO.OUT)
+GPIO.output(Motor2Enable, GPIO.LOW) # motor stop
+# ODO odo sensors setups
+GPIO.setup(odo_sensor_r, GPIO.IN, pull_up_down=GPIO.PUD_UP)    # Set Sensor_Out's mode is input, and pull up to high level(3.3V)
+GPIO.setup(odo_sensor_l, GPIO.IN, pull_up_down=GPIO.PUD_UP)    # Set Sensor_Out's mode is input, and pull up to high level(3.3V)
+GPIO.add_event_detect(odo_sensor_r, GPIO.FALLING,bouncetime=10) # wait for falling
+GPIO.add_event_detect(odo_sensor_l, GPIO.FALLING,bouncetime=10) # wait for falling
+
+#================================================
+# define measure_distance functions
+#---------------------------------------------------------------------------------------------------
+def measure_distance(TRIG,ECHO):
+	GPIO.output(TRIG, False)
+	pulse_start=0  # initialize variables 
+	pulse_end=0
+
+	GPIO.output(TRIG, True)
+	time.sleep(0.00001)
+	GPIO.output(TRIG, False)
+
+	while GPIO.input(ECHO)==0:
+		pulse_start = time.time()
+
+	while GPIO.input(ECHO)==1:
+  		pulse_end = time.time()
+
+	pulse_duration = pulse_end - pulse_start
+
+	distance = pulse_duration * 17150
+	distance = round(distance, 2)
+	return distance
+#=====================================================================================================
+def MoveFwd(m1speed,m2speed,maxdist):  # moves car forward Motor 1 speed & Motor 2 speed
+	print "run forwards"
+	cum_counter_r=0 # initiate cummulative counter
+	cum_counter_l=0	
+	cum_counter_inc=4  # used for taking a sensor reading every x ODO readings
+	mp1 = GPIO.PWM(MotorEnable, 1000)     # set Frequece to 1KHz
+	mp2 = GPIO.PWM(Motor2Enable, 1000)    
+	mp1.start(m1speed)                     # Set initial duty cycle (motor speed)
+	mp2.start(m2speed)
+	new_time=time.time()              # initialize time
+	wall_distance_fc = 1000  # initialize wall distances
+	wall_distance_fl = 1000
+	wall_distance_fr = 1000  
+		
+	while wall_distance_fc>50 and wall_distance_fr>15 and wall_distance_fl>15 and cum_counter_r<maxdist:	
+		GPIO.output(MotorPin1, GPIO.HIGH)  # clockwise
+		GPIO.output(MotorPin2, GPIO.LOW)
+		GPIO.output(Motor2Pin1, GPIO.HIGH)  # clockwise
+		GPIO.output(Motor2Pin2, GPIO.LOW)		
+		# look for sensor events and increment counter
+		if GPIO.event_detected(odo_sensor_r):
+			cum_counter_r=cum_counter_r+1
+			if cum_counter_r%cum_counter_inc==0:	
+				old_time=new_time
+				new_time=time.time()
+				delta_time=round(new_time-old_time,3)
+				speed=round(1/delta_time*cum_counter_inc,0)
+				if speed >100:   # limit speed to 100
+					speed=100 
+				#print "speed: ",speed, "nt ",new_time,"dt ",delta_time,"ODO",cum_counter_r
+				new_bearing=  round(get_bearing(),0)
+				wall_distance_fc =measure_distance(TRIG_FC,ECHO_FC) # update distances
+				wall_distance_fl = round(measure_distance(TRIG_FL,ECHO_FL),0)
+				wall_distance_fr = round(measure_distance(TRIG_FR,ECHO_FR),0)
+				print "cum_ODO,dt,s,b-",cum_counter_r,delta_time,speed,new_bearing,"d fc fl fr--",wall_distance_fc,wall_distance_fl,wall_distance_fr
+				
+		
+	# stop
+	mp1.stop  # stops PWM
+	mp2.stop
+	GPIO.output(MotorEnable, GPIO.LOW) # motor stop
+	GPIO.output(Motor2Enable, GPIO.LOW) # added code motor2 stop	
+#  End Car Movement Functions ====================================
+
+def destroy():
+	GPIO.output(MotorEnable, GPIO.LOW) # motor stop
+	GPIO.output(Motor2Enable, GPIO.LOW) # added code motor2 stop
+	GPIO.cleanup()                     # Release resource
+
+if __name__ == '__main__':     # Program start from here
+	print "start program"
+	try:	
+		MoveFwd(55,46,250)  # start PWM L /R, odo max
+		GPIO.cleanup()                     # Release resource
+	
+	except KeyboardInterrupt:  # When 'Ctrl+C' is pressed, the child program destroy() will be  executed.
+		destroy()
