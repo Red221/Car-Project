@@ -1,0 +1,19 @@
+#!/usr/bin/env python
+# module_trackxy_v1a.py   #  modual for tracking x/y location
+
+import time
+import math
+
+#    import sensor & pin assignment modules  ========================================================================
+import module_compass_v1a
+get_bearing=module_compass_v1a.get_bearing
+import module_measure_distance_v1a   
+measure_distance=module_measure_distance_v1a.measure_distance
+from module_pin_motor_setup_v01a import *
+
+
+def calc_delta_xy(delta_ODO,bearing):
+	delta_x=round(math.cos(math.radians(bearing))*delta_ODO*1.05,2)   # 1.05 cm per ODO count
+	delta_y=round(math.sin(math.radians(bearing))*delta_ODO*1.05,2) 
+	delta_xy=[delta_x,delta_y]
+	return delta_xy
