@@ -1,0 +1,42 @@
+#!/usr/bin/env python
+#  ODOtest_v_01a
+
+import RPi.GPIO as GPIO
+import time
+import smbus
+import math   
+
+# Assign Odometer Sensors Pins
+odo_sensor_r = 22    # pin22 --- right odometer sensor
+odo_sensor_l = 29    # pin 29--  left odometer sensor
+
+GPIO.setmode(GPIO.BOARD) # Numbers GPIOs by physical location
+
+# ODO odo sensors setups
+GPIO.setup(odo_sensor_r, GPIO.IN, pull_up_down=GPIO.PUD_UP)    # Set Sensor_Out's mode is input, and pull up to high level(3.3V)
+GPIO.setup(odo_sensor_l, GPIO.IN, pull_up_down=GPIO.PUD_UP)    # Set Sensor_Out's mode is input, and pull up to high level(3.3V)
+GPIO.add_event_detect(odo_sensor_r, GPIO.FALLING,bouncetime=2) # wait for falling
+GPIO.add_event_detect(odo_sensor_l, GPIO.FALLING,bouncetime=2) # wait for falling
+
+def destroy():
+	GPIO.cleanup()                     # Release resource
+if __name__ == '__main__':     # Program start from here
+	print "start program"
+	try:	
+		new_time=time.time()
+		cum_counter_r=0
+		cum_dt=0
+		while cum_counter_r<100:
+			if GPIO.event_detected(odo_sensor_r):
+				cum_counter_r=cum_counter_r+1
+				old_time=new_time
+				new_time=time.time()
+				delta_time=new_time-old_time
+				cum_dt=cum_dt+delta_time
+				speed=round(1/delta_time,0)
+				print cum_counter_r,speed,delta_time,cum_dt
+
+		GPIO.cleanup()                     # Release resource
+	
+	except KeyboardInterrupt:  # When 'Ctrl+C' is pressed, the child program destroy() will be  executed.
+		destroy()
