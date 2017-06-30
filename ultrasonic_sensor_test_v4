@@ -1,0 +1,54 @@
+#!/usr/bin/env python
+# ultrasonic_sensor_test_v4.py
+# added front left sensor 
+
+import RPi.GPIO as GPIO
+import time
+import smbus
+import math
+
+# Assign Ultra Sonic Pins
+TRIG_FC = 31  # Front Center Sensor
+ECHO_FC = 33
+TRIG_BC=35  # Back Center Sensor
+ECHO_BC =37
+TRIG_FL=8  # Front Left Sensor
+ECHO_FL=10
+TRIG_FR=40 # Front Right Sensor
+ECHO_FR=38
+GPIO.setmode(GPIO.BOARD) # Numbers GPIOs by physical location
+# setup ultra sonic sensor input/output
+GPIO.setup(TRIG_FC,GPIO.OUT)
+GPIO.setup(ECHO_FC,GPIO.IN)
+GPIO.setup(TRIG_BC,GPIO.OUT)
+GPIO.setup(ECHO_BC,GPIO.IN)
+GPIO.setup(TRIG_FL,GPIO.OUT)
+GPIO.setup(ECHO_FL,GPIO.IN)
+GPIO.setup(TRIG_FR,GPIO.OUT)
+GPIO.setup(ECHO_FR,GPIO.IN)
+
+#================================================
+# define measure_distance function for front sensor
+
+
+def measure_distance(TRIG,ECHO):
+	GPIO.output(TRIG, False)
+	pulse_start=0  # initialize variables 
+	pulse_end=0
+	time.sleep(0.2)
+	GPIO.output(TRIG, True)
+	time.sleep(0.00001)  # should be 0.00001
+	GPIO.output(TRIG, False)
+	while GPIO.input(ECHO)==0:
+		pulse_start = time.time()	
+	while GPIO.input(ECHO)==1:
+  		pulse_end = time.time()
+
+	pulse_duration = pulse_end - pulse_start
+
+	distance = pulse_duration * 17150
+	distance = round(distance, 2)
+	return distance
+
+try: 
+	while True:
